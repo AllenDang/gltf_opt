@@ -213,13 +213,13 @@ fn add_texture(
         let mime_type = if convert_to_ktx2 {
             "image/ktx2"
         } else {
-            "image/png"
+            "image/jpeg"
         };
 
         let resize_func = if convert_to_ktx2 {
             resize_to_ktx2
         } else {
-            resize_to_png
+            resize_to_jpg
         };
 
         return match resize_func(bct_image_data, n_tex_size, n_tex_size, &mut writer) {
@@ -245,10 +245,7 @@ fn add_texture(
 
                 Some(new_info)
             }
-            Err(e) => {
-                println!("{e:?}");
-                None
-            }
+            Err(_) => None,
         };
     }
     None
@@ -270,13 +267,13 @@ fn add_normal_texture(
         let mime_type = if convert_to_ktx2 {
             "image/ktx2"
         } else {
-            "image/jpeg"
+            "image/png"
         };
 
         let resize_func = if convert_to_ktx2 {
             resize_to_ktx2
         } else {
-            resize_to_jpg
+            resize_to_png
         };
 
         return match resize_func(bct_image_data, n_tex_size, n_tex_size, &mut writer) {
@@ -302,10 +299,7 @@ fn add_normal_texture(
 
                 Some(new_normal)
             }
-            Err(e) => {
-                println!("{e:?}");
-                None
-            }
+            Err(_) => None,
         };
     }
 
