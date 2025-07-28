@@ -72,7 +72,8 @@ fn resize_to_ktx2<W: Write>(
     let mut resizer = fast_image_resize::Resizer::new();
     resizer.resize(&src_img, &mut dst_img, None)?;
 
-    let mut ktx2_tex = Ktx2Texture::create(width, height, 1, 1, 1, 1, 37)?;
+    let mut ktx2_tex =
+        Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Unorm)?;
     ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
     ktx2_tex.set_metadata("Tool", b"glb_opt")?;
     ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
