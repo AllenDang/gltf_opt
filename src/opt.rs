@@ -20,13 +20,32 @@ fn resize_to_jpg<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let img = image::load_from_memory(img_data)?;
 
-    let mut dst_img =
-        fast_image_resize::images::Image::new(width, height, img.pixel_type().unwrap());
+    // Only resize if image dimensions are greater than target dimensions
+    if img.width() > width || img.height() > height {
+        let mut dst_img = fast_image_resize::images::Image::new(
+            width,
+            height,
+            img.pixel_type().ok_or("failed to create resize image")?,
+        );
 
-    let mut resizer = fast_image_resize::Resizer::new();
-    resizer.resize(&img, &mut dst_img, None)?;
+        let mut resizer = fast_image_resize::Resizer::new();
+        resizer.resize(&img, &mut dst_img, None)?;
 
-    JpegEncoder::new(&mut buf).write_image(dst_img.buffer(), width, height, img.color().into())?;
+        JpegEncoder::new(&mut buf).write_image(
+            dst_img.buffer(),
+            width,
+            height,
+            img.color().into(),
+        )?;
+    } else {
+        // If image is smaller or equal to target size, just copy it as is
+        JpegEncoder::new(&mut buf).write_image(
+            img.as_bytes(),
+            img.width(),
+            img.height(),
+            img.color().into(),
+        )?;
+    }
 
     Ok(())
 }
@@ -39,13 +58,32 @@ fn resize_to_png<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let img = image::load_from_memory(img_data)?;
 
-    let mut dst_img =
-        fast_image_resize::images::Image::new(width, height, img.pixel_type().unwrap());
+    // Only resize if image dimensions are greater than target dimensions
+    if img.width() > width || img.height() > height {
+        let mut dst_img = fast_image_resize::images::Image::new(
+            width,
+            height,
+            img.pixel_type().ok_or("failed to create resize image")?,
+        );
 
-    let mut resizer = fast_image_resize::Resizer::new();
-    resizer.resize(&img, &mut dst_img, None)?;
+        let mut resizer = fast_image_resize::Resizer::new();
+        resizer.resize(&img, &mut dst_img, None)?;
 
-    PngEncoder::new(&mut buf).write_image(dst_img.buffer(), width, height, img.color().into())?;
+        PngEncoder::new(&mut buf).write_image(
+            dst_img.buffer(),
+            width,
+            height,
+            img.color().into(),
+        )?;
+    } else {
+        // If image is smaller or equal to target size, just copy it as is
+        PngEncoder::new(&mut buf).write_image(
+            img.as_bytes(),
+            img.width(),
+            img.height(),
+            img.color().into(),
+        )?;
+    }
 
     Ok(())
 }
@@ -59,37 +97,77 @@ fn resize_to_ktx2<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let img = image::load_from_memory(img_data)?;
 
-    let src_img = fast_image_resize::images::Image::from_vec_u8(
-        img.width(),
-        img.height(),
-        img.to_rgba8().into_raw(),
-        fast_image_resize::PixelType::U8x4, // Always RGBA8
-    )?;
+    // Only resize if image dimensions are greater than target dimensions
+    if img.width() > width || img.height() > height {
+        let src_img = fast_image_resize::images::Image::from_vec_u8(
+            img.width(),
+            img.height(),
+            img.to_rgba8().into_raw(),
+            fast_image_resize::PixelType::U8x4, // Always RGBA8
+        )?;
 
-    let mut dst_img =
-        fast_image_resize::images::Image::new(width, height, fast_image_resize::PixelType::U8x4);
+        let mut dst_img = fast_image_resize::images::Image::new(
+            width,
+            height,
+            fast_image_resize::PixelType::U8x4,
+        );
 
-    let mut resizer = fast_image_resize::Resizer::new();
-    resizer.resize(&src_img, &mut dst_img, None)?;
+        let mut resizer = fast_image_resize::Resizer::new();
+        resizer.resize(&src_img, &mut dst_img, None)?;
 
-    let mut ktx2_tex =
-        Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Srgb)?;
-    ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
-    ktx2_tex.set_metadata("Tool", b"glb_opt")?;
-    ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
+        let mut ktx2_tex =
+            Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Srgb)?;
+        ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
+        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
+        ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
 
-    let etc1s_params = BasisCompressionParams::builder()
-        .uastc(false)
-        .thread_count(num_cpus::get() as u32)
-        .quality_level(224)
-        .endpoint_rdo_threshold(1.25)
-        .selector_rdo_threshold(1.25)
-        .build();
-    ktx2_tex.compress_basis(&etc1s_params)?;
-    ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
+        let etc1s_params = BasisCompressionParams::builder()
+            .uastc(false)
+            .thread_count(num_cpus::get() as u32)
+            .quality_level(150)
+            .endpoint_rdo_threshold(1.25)
+            .selector_rdo_threshold(1.25)
+            .build();
+        ktx2_tex.compress_basis(&etc1s_params)?;
+        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
 
-    let ktx2_data = ktx2_tex.write_to_memory()?;
-    buf.write_all(&ktx2_data)?;
+        let ktx2_data = ktx2_tex.write_to_memory()?;
+        buf.write_all(&ktx2_data)?;
+    } else {
+        // If image is smaller or equal to target size, use original image data directly
+        // Convert to RGBA8 only if not already in that format
+        let rgba_img = img.to_rgba8();
+        let img_data = rgba_img.as_raw();
+
+        let mut ktx2_tex = Ktx2Texture::create(
+            img.width(),
+            img.height(),
+            1,
+            1,
+            1,
+            1,
+            ktx2_rw::VkFormat::R8G8B8A8Srgb,
+        )?;
+        ktx2_tex.set_image_data(0, 0, 0, img_data)?;
+        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
+        ktx2_tex.set_metadata(
+            "Dimensions",
+            format!("{}x{}", img.width(), img.height()).as_bytes(),
+        )?;
+
+        let etc1s_params = BasisCompressionParams::builder()
+            .uastc(false)
+            .thread_count(num_cpus::get() as u32)
+            .quality_level(150)
+            .endpoint_rdo_threshold(1.25)
+            .selector_rdo_threshold(1.25)
+            .build();
+        ktx2_tex.compress_basis(&etc1s_params)?;
+        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
+
+        let ktx2_data = ktx2_tex.write_to_memory()?;
+        buf.write_all(&ktx2_data)?;
+    }
 
     Ok(())
 }
@@ -225,7 +303,11 @@ fn add_texture(
 
         return match resize_func(bct_image_data, n_tex_size, n_tex_size, &mut writer) {
             Ok(_) => {
-                let new_image = o_json.images.get(info.index.value()).unwrap().clone();
+                // Get image with proper error handling
+                let new_image = match o_json.images.get(info.index.value()) {
+                    Some(img) => img.clone(),
+                    None => return None,
+                };
 
                 let idx_img = add_image(
                     n_blob,
@@ -235,8 +317,11 @@ fn add_texture(
                     mime_type,
                 );
 
-                // create new texture
-                let mut new_tex = o_json.textures.get(info.index.value()).unwrap().clone();
+                // Get texture with proper error handling
+                let mut new_tex = match o_json.textures.get(info.index.value()) {
+                    Some(tex) => tex.clone(),
+                    None => return None,
+                };
                 new_tex.source = idx_img;
 
                 let idx_tex = n_json.push(new_tex);
@@ -279,7 +364,11 @@ fn add_normal_texture(
 
         return match resize_func(bct_image_data, n_tex_size, n_tex_size, &mut writer) {
             Ok(_) => {
-                let new_image = o_json.images.get(normal.index.value()).unwrap().clone();
+                // Get image with proper error handling
+                let new_image = match o_json.images.get(normal.index.value()) {
+                    Some(img) => img.clone(),
+                    None => return None,
+                };
 
                 let idx_img = add_image(
                     n_blob,
@@ -289,8 +378,11 @@ fn add_normal_texture(
                     mime_type,
                 );
 
-                // create new texture
-                let mut new_tex = o_json.textures.get(normal.index.value()).unwrap().clone();
+                // Get texture with proper error handling
+                let mut new_tex = match o_json.textures.get(normal.index.value()) {
+                    Some(tex) => tex.clone(),
+                    None => return None,
+                };
                 new_tex.source = idx_img;
 
                 let idx_tex = n_json.push(new_tex);
@@ -408,7 +500,7 @@ pub fn optimize<R: Read + Seek>(
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let o_data = gltf::Gltf::from_reader(reader)?;
     let o_json = o_data.as_json();
-    let o_blob = o_data.blob.as_deref().unwrap();
+    let o_blob = o_data.blob.as_deref().ok_or("failed to get o_data")?;
 
     let mut n_blob: Vec<u8> = Vec::new();
 
