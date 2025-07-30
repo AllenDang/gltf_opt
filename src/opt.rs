@@ -12,6 +12,14 @@ use image::{
 };
 use ktx2_rw::{BasisCompressionParams, Ktx2Texture};
 
+/// Enum to specify the type of texture for appropriate compression settings
+#[derive(Debug, Clone, Copy)]
+enum TextureType {
+    BaseColor,         // sRGB color textures
+    Normal,            // Normal maps (need higher quality)
+    MetallicRoughness, // Material property textures
+}
+
 fn resize_to_jpg<W: Write>(
     img_data: &[u8],
     width: u32,
@@ -88,195 +96,25 @@ fn resize_to_png<W: Write>(
     Ok(())
 }
 
-/// Resize and convert normal map to ktx2 with Basis Universal compression
-/// Uses linear color space format appropriate for normal maps
-fn resize_to_ktx2_normal<W: Write>(
-    img_data: &[u8],
-    width: u32,
-    height: u32,
-    mut buf: W,
-) -> Result<(), Box<dyn Error>> {
-    let img = image::load_from_memory(img_data)?;
-
-    // Only resize if image dimensions are greater than target dimensions
-    if img.width() > width || img.height() > height {
-        let src_img = fast_image_resize::images::Image::from_vec_u8(
-            img.width(),
-            img.height(),
-            img.to_rgba8().into_raw(),
-            fast_image_resize::PixelType::U8x4, // Always RGBA8
-        )?;
-
-        let mut dst_img = fast_image_resize::images::Image::new(
-            width,
-            height,
-            fast_image_resize::PixelType::U8x4,
-        );
-
-        let mut resizer = fast_image_resize::Resizer::new();
-        resizer.resize(&src_img, &mut dst_img, None)?;
-
-        // Use R8G8B8A8Unorm (linear) format for normal maps instead of Srgb
-        let mut ktx2_tex =
-            Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Unorm)?;
-        ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
-        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
-        ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
-
-        // Use more conservative compression settings for normal maps
-        let etc1s_params = BasisCompressionParams::builder()
-            .uastc(false)
-            .thread_count(num_cpus::get() as u32)
-            .quality_level(180) // Higher quality for normal maps
-            .endpoint_rdo_threshold(1.0) // More conservative RDO
-            .selector_rdo_threshold(1.0) // More conservative RDO
-            .build();
-        ktx2_tex.compress_basis(&etc1s_params)?;
-        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
-
-        let ktx2_data = ktx2_tex.write_to_memory()?;
-        buf.write_all(&ktx2_data)?;
-    } else {
-        // If image is smaller or equal to target size, use original image data directly
-        let rgba_img = img.to_rgba8();
-        let img_data = rgba_img.as_raw();
-
-        // Use R8G8B8A8Unorm (linear) format for normal maps instead of Srgb
-        let mut ktx2_tex = Ktx2Texture::create(
-            img.width(),
-            img.height(),
-            1,
-            1,
-            1,
-            1,
-            ktx2_rw::VkFormat::R8G8B8A8Unorm,
-        )?;
-        ktx2_tex.set_image_data(0, 0, 0, img_data)?;
-        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
-        ktx2_tex.set_metadata(
-            "Dimensions",
-            format!("{}x{}", img.width(), img.height()).as_bytes(),
-        )?;
-
-        // Use more conservative compression settings for normal maps
-        let etc1s_params = BasisCompressionParams::builder()
-            .uastc(false)
-            .thread_count(num_cpus::get() as u32)
-            .quality_level(180) // Higher quality for normal maps
-            .endpoint_rdo_threshold(1.0) // More conservative RDO
-            .selector_rdo_threshold(1.0) // More conservative RDO
-            .build();
-        ktx2_tex.compress_basis(&etc1s_params)?;
-        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
-
-        let ktx2_data = ktx2_tex.write_to_memory()?;
-        buf.write_all(&ktx2_data)?;
-    }
-
-    Ok(())
-}
-
-/// Resize and convert metallic/roughness texture to ktx2 with Basis Universal compression
-/// Uses linear color space format appropriate for material property textures
-fn resize_to_ktx2_linear<W: Write>(
-    img_data: &[u8],
-    width: u32,
-    height: u32,
-    mut buf: W,
-) -> Result<(), Box<dyn Error>> {
-    let img = image::load_from_memory(img_data)?;
-
-    // Only resize if image dimensions are greater than target dimensions
-    if img.width() > width || img.height() > height {
-        let src_img = fast_image_resize::images::Image::from_vec_u8(
-            img.width(),
-            img.height(),
-            img.to_rgba8().into_raw(),
-            fast_image_resize::PixelType::U8x4, // Always RGBA8
-        )?;
-
-        let mut dst_img = fast_image_resize::images::Image::new(
-            width,
-            height,
-            fast_image_resize::PixelType::U8x4,
-        );
-
-        let mut resizer = fast_image_resize::Resizer::new();
-        resizer.resize(&src_img, &mut dst_img, None)?;
-
-        // Use R8G8B8A8Unorm (linear) format for material property textures
-        let mut ktx2_tex =
-            Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Unorm)?;
-        ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
-        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
-        ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
-
-        // Use standard compression settings for metallic/roughness textures
-        let etc1s_params = BasisCompressionParams::builder()
-            .uastc(false)
-            .thread_count(num_cpus::get() as u32)
-            .quality_level(150)
-            .endpoint_rdo_threshold(1.25)
-            .selector_rdo_threshold(1.25)
-            .build();
-        ktx2_tex.compress_basis(&etc1s_params)?;
-        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
-
-        let ktx2_data = ktx2_tex.write_to_memory()?;
-        buf.write_all(&ktx2_data)?;
-    } else {
-        // If image is smaller or equal to target size, use original image data directly
-        let rgba_img = img.to_rgba8();
-        let img_data = rgba_img.as_raw();
-
-        // Use R8G8B8A8Unorm (linear) format for material property textures
-        let mut ktx2_tex = Ktx2Texture::create(
-            img.width(),
-            img.height(),
-            1,
-            1,
-            1,
-            1,
-            ktx2_rw::VkFormat::R8G8B8A8Unorm,
-        )?;
-        ktx2_tex.set_image_data(0, 0, 0, img_data)?;
-        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
-        ktx2_tex.set_metadata(
-            "Dimensions",
-            format!("{}x{}", img.width(), img.height()).as_bytes(),
-        )?;
-
-        // Use standard compression settings for metallic/roughness textures
-        let etc1s_params = BasisCompressionParams::builder()
-            .uastc(false)
-            .thread_count(num_cpus::get() as u32)
-            .quality_level(150)
-            .endpoint_rdo_threshold(1.25)
-            .selector_rdo_threshold(1.25)
-            .build();
-        ktx2_tex.compress_basis(&etc1s_params)?;
-        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
-
-        let ktx2_data = ktx2_tex.write_to_memory()?;
-        buf.write_all(&ktx2_data)?;
-    }
-
-    Ok(())
-}
-
-/// Resize and convert jpeg/png to ktx2 with Basis Universal compression
+/// Unified function to resize and convert images to KTX2 with Basis Universal compression
+/// Uses appropriate compression settings based on texture type
 fn resize_to_ktx2<W: Write>(
     img_data: &[u8],
     width: u32,
     height: u32,
+    texture_type: TextureType,
     mut buf: W,
 ) -> Result<(), Box<dyn Error>> {
     let img = image::load_from_memory(img_data)?;
 
+    // Get compression parameters based on texture type
+    let (quality_level, endpoint_rdo, selector_rdo) = match texture_type {
+        TextureType::Normal => (180, 1.0, 1.0), // Higher quality for normal maps
+        TextureType::BaseColor | TextureType::MetallicRoughness => (150, 1.25, 1.25), // Standard quality
+    };
+
     // Only resize if image dimensions are greater than target dimensions
     if img.width() > width || img.height() > height {
-        // For base color textures, we need to preserve sRGB data properly
-        // Convert to RGBA8 but keep the sRGB color space
         let rgba_img = img.to_rgba8();
 
         let src_img = fast_image_resize::images::Image::from_vec_u8(
@@ -295,8 +133,7 @@ fn resize_to_ktx2<W: Write>(
         let mut resizer = fast_image_resize::Resizer::new();
         resizer.resize(&src_img, &mut dst_img, None)?;
 
-        // Use R8G8B8A8Unorm (linear) format and let the renderer handle sRGB conversion
-        // This avoids double gamma correction
+        // All texture types now use R8G8B8A8Unorm (linear) format
         let mut ktx2_tex =
             Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Unorm)?;
         ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
@@ -306,9 +143,9 @@ fn resize_to_ktx2<W: Write>(
         let etc1s_params = BasisCompressionParams::builder()
             .uastc(false)
             .thread_count(num_cpus::get() as u32)
-            .quality_level(150)
-            .endpoint_rdo_threshold(1.25)
-            .selector_rdo_threshold(1.25)
+            .quality_level(quality_level)
+            .endpoint_rdo_threshold(endpoint_rdo)
+            .selector_rdo_threshold(selector_rdo)
             .build();
         ktx2_tex.compress_basis(&etc1s_params)?;
         ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
@@ -320,7 +157,6 @@ fn resize_to_ktx2<W: Write>(
         let rgba_img = img.to_rgba8();
         let img_data = rgba_img.as_raw();
 
-        // Use R8G8B8A8Unorm (linear) format to avoid double gamma correction
         let mut ktx2_tex = Ktx2Texture::create(
             img.width(),
             img.height(),
@@ -340,9 +176,9 @@ fn resize_to_ktx2<W: Write>(
         let etc1s_params = BasisCompressionParams::builder()
             .uastc(false)
             .thread_count(num_cpus::get() as u32)
-            .quality_level(150)
-            .endpoint_rdo_threshold(1.25)
-            .selector_rdo_threshold(1.25)
+            .quality_level(quality_level)
+            .endpoint_rdo_threshold(endpoint_rdo)
+            .selector_rdo_threshold(selector_rdo)
             .build();
         ktx2_tex.compress_basis(&etc1s_params)?;
         ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
@@ -514,13 +350,19 @@ fn add_texture(
             "image/jpeg"
         };
 
-        let resize_func = if convert_to_ktx2 {
-            resize_to_ktx2
+        let resize_result = if convert_to_ktx2 {
+            resize_to_ktx2(
+                bct_image_data,
+                n_tex_size,
+                n_tex_size,
+                TextureType::BaseColor,
+                &mut writer,
+            )
         } else {
-            resize_to_jpg
+            resize_to_jpg(bct_image_data, n_tex_size, n_tex_size, &mut writer)
         };
 
-        return match resize_func(bct_image_data, n_tex_size, n_tex_size, &mut writer) {
+        return match resize_result {
             Ok(_) => {
                 // Get image with proper error handling
                 let new_image = match o_json.images.get(info.index.value()) {
@@ -575,13 +417,19 @@ fn add_normal_texture(
             "image/png"
         };
 
-        let resize_func = if convert_to_ktx2 {
-            resize_to_ktx2_normal
+        let resize_result = if convert_to_ktx2 {
+            resize_to_ktx2(
+                bct_image_data,
+                n_tex_size,
+                n_tex_size,
+                TextureType::Normal,
+                &mut writer,
+            )
         } else {
-            resize_to_png
+            resize_to_png(bct_image_data, n_tex_size, n_tex_size, &mut writer)
         };
 
-        return match resize_func(bct_image_data, n_tex_size, n_tex_size, &mut writer) {
+        return match resize_result {
             Ok(_) => {
                 // Get image with proper error handling
                 let new_image = match o_json.images.get(normal.index.value()) {
@@ -637,13 +485,19 @@ fn add_metallic_roughness_texture(
             "image/jpeg"
         };
 
-        let resize_func = if convert_to_ktx2 {
-            resize_to_ktx2_linear // Use linear format for metallic/roughness
+        let resize_result = if convert_to_ktx2 {
+            resize_to_ktx2(
+                bct_image_data,
+                n_tex_size,
+                n_tex_size,
+                TextureType::MetallicRoughness,
+                &mut writer,
+            )
         } else {
-            resize_to_jpg
+            resize_to_jpg(bct_image_data, n_tex_size, n_tex_size, &mut writer)
         };
 
-        return match resize_func(bct_image_data, n_tex_size, n_tex_size, &mut writer) {
+        return match resize_result {
             Ok(_) => {
                 // Get image with proper error handling
                 let new_image = match o_json.images.get(info.index.value()) {
