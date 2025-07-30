@@ -275,10 +275,14 @@ fn resize_to_ktx2<W: Write>(
 
     // Only resize if image dimensions are greater than target dimensions
     if img.width() > width || img.height() > height {
+        // For base color textures, we need to preserve sRGB data properly
+        // Convert to RGBA8 but keep the sRGB color space
+        let rgba_img = img.to_rgba8();
+
         let src_img = fast_image_resize::images::Image::from_vec_u8(
             img.width(),
             img.height(),
-            img.to_rgba8().into_raw(),
+            rgba_img.into_raw(),
             fast_image_resize::PixelType::U8x4, // Always RGBA8
         )?;
 
@@ -291,8 +295,10 @@ fn resize_to_ktx2<W: Write>(
         let mut resizer = fast_image_resize::Resizer::new();
         resizer.resize(&src_img, &mut dst_img, None)?;
 
+        // Use R8G8B8A8Unorm (linear) format and let the renderer handle sRGB conversion
+        // This avoids double gamma correction
         let mut ktx2_tex =
-            Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Srgb)?;
+            Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Unorm)?;
         ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
         ktx2_tex.set_metadata("Tool", b"glb_opt")?;
         ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
@@ -311,10 +317,10 @@ fn resize_to_ktx2<W: Write>(
         buf.write_all(&ktx2_data)?;
     } else {
         // If image is smaller or equal to target size, use original image data directly
-        // Convert to RGBA8 only if not already in that format
         let rgba_img = img.to_rgba8();
         let img_data = rgba_img.as_raw();
 
+        // Use R8G8B8A8Unorm (linear) format to avoid double gamma correction
         let mut ktx2_tex = Ktx2Texture::create(
             img.width(),
             img.height(),
@@ -322,7 +328,7 @@ fn resize_to_ktx2<W: Write>(
             1,
             1,
             1,
-            ktx2_rw::VkFormat::R8G8B8A8Srgb,
+            ktx2_rw::VkFormat::R8G8B8A8Unorm,
         )?;
         ktx2_tex.set_image_data(0, 0, 0, img_data)?;
         ktx2_tex.set_metadata("Tool", b"glb_opt")?;
@@ -409,8 +415,14 @@ fn add_image(
 
     // Update name and URI when converting to KTX2
     if mime_type == "image/ktx2" {
+        // Update existing name/URI if they exist
         n_img.name = update_image_name_for_ktx2(&img.name);
         n_img.uri = update_image_name_for_ktx2(&img.uri);
+
+        // If no name was set, generate a default KTX2 name
+        if n_img.name.is_none() {
+            n_img.name = Some(format!("texture_{}.ktx2", n_json.images.len()));
+        }
     }
 
     n_json.push(n_img)
