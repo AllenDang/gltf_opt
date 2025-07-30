@@ -88,6 +88,94 @@ fn resize_to_png<W: Write>(
     Ok(())
 }
 
+/// Resize and convert normal map to ktx2 with Basis Universal compression
+/// Uses linear color space format appropriate for normal maps
+fn resize_to_ktx2_normal<W: Write>(
+    img_data: &[u8],
+    width: u32,
+    height: u32,
+    mut buf: W,
+) -> Result<(), Box<dyn Error>> {
+    let img = image::load_from_memory(img_data)?;
+
+    // Only resize if image dimensions are greater than target dimensions
+    if img.width() > width || img.height() > height {
+        let src_img = fast_image_resize::images::Image::from_vec_u8(
+            img.width(),
+            img.height(),
+            img.to_rgba8().into_raw(),
+            fast_image_resize::PixelType::U8x4, // Always RGBA8
+        )?;
+
+        let mut dst_img = fast_image_resize::images::Image::new(
+            width,
+            height,
+            fast_image_resize::PixelType::U8x4,
+        );
+
+        let mut resizer = fast_image_resize::Resizer::new();
+        resizer.resize(&src_img, &mut dst_img, None)?;
+
+        // Use R8G8B8A8Unorm (linear) format for normal maps instead of Srgb
+        let mut ktx2_tex =
+            Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Unorm)?;
+        ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
+        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
+        ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
+
+        // Use more conservative compression settings for normal maps
+        let etc1s_params = BasisCompressionParams::builder()
+            .uastc(false)
+            .thread_count(num_cpus::get() as u32)
+            .quality_level(180) // Higher quality for normal maps
+            .endpoint_rdo_threshold(1.0) // More conservative RDO
+            .selector_rdo_threshold(1.0) // More conservative RDO
+            .build();
+        ktx2_tex.compress_basis(&etc1s_params)?;
+        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
+
+        let ktx2_data = ktx2_tex.write_to_memory()?;
+        buf.write_all(&ktx2_data)?;
+    } else {
+        // If image is smaller or equal to target size, use original image data directly
+        let rgba_img = img.to_rgba8();
+        let img_data = rgba_img.as_raw();
+
+        // Use R8G8B8A8Unorm (linear) format for normal maps instead of Srgb
+        let mut ktx2_tex = Ktx2Texture::create(
+            img.width(),
+            img.height(),
+            1,
+            1,
+            1,
+            1,
+            ktx2_rw::VkFormat::R8G8B8A8Unorm,
+        )?;
+        ktx2_tex.set_image_data(0, 0, 0, img_data)?;
+        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
+        ktx2_tex.set_metadata(
+            "Dimensions",
+            format!("{}x{}", img.width(), img.height()).as_bytes(),
+        )?;
+
+        // Use more conservative compression settings for normal maps
+        let etc1s_params = BasisCompressionParams::builder()
+            .uastc(false)
+            .thread_count(num_cpus::get() as u32)
+            .quality_level(180) // Higher quality for normal maps
+            .endpoint_rdo_threshold(1.0) // More conservative RDO
+            .selector_rdo_threshold(1.0) // More conservative RDO
+            .build();
+        ktx2_tex.compress_basis(&etc1s_params)?;
+        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
+
+        let ktx2_data = ktx2_tex.write_to_memory()?;
+        buf.write_all(&ktx2_data)?;
+    }
+
+    Ok(())
+}
+
 /// Resize and convert jpeg/png to ktx2 with Basis Universal compression
 fn resize_to_ktx2<W: Write>(
     img_data: &[u8],
@@ -357,7 +445,7 @@ fn add_normal_texture(
         };
 
         let resize_func = if convert_to_ktx2 {
-            resize_to_ktx2
+            resize_to_ktx2_normal
         } else {
             resize_to_png
         };
