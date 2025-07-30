@@ -176,6 +176,94 @@ fn resize_to_ktx2_normal<W: Write>(
     Ok(())
 }
 
+/// Resize and convert metallic/roughness texture to ktx2 with Basis Universal compression
+/// Uses linear color space format appropriate for material property textures
+fn resize_to_ktx2_linear<W: Write>(
+    img_data: &[u8],
+    width: u32,
+    height: u32,
+    mut buf: W,
+) -> Result<(), Box<dyn Error>> {
+    let img = image::load_from_memory(img_data)?;
+
+    // Only resize if image dimensions are greater than target dimensions
+    if img.width() > width || img.height() > height {
+        let src_img = fast_image_resize::images::Image::from_vec_u8(
+            img.width(),
+            img.height(),
+            img.to_rgba8().into_raw(),
+            fast_image_resize::PixelType::U8x4, // Always RGBA8
+        )?;
+
+        let mut dst_img = fast_image_resize::images::Image::new(
+            width,
+            height,
+            fast_image_resize::PixelType::U8x4,
+        );
+
+        let mut resizer = fast_image_resize::Resizer::new();
+        resizer.resize(&src_img, &mut dst_img, None)?;
+
+        // Use R8G8B8A8Unorm (linear) format for material property textures
+        let mut ktx2_tex =
+            Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Unorm)?;
+        ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
+        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
+        ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
+
+        // Use standard compression settings for metallic/roughness textures
+        let etc1s_params = BasisCompressionParams::builder()
+            .uastc(false)
+            .thread_count(num_cpus::get() as u32)
+            .quality_level(150)
+            .endpoint_rdo_threshold(1.25)
+            .selector_rdo_threshold(1.25)
+            .build();
+        ktx2_tex.compress_basis(&etc1s_params)?;
+        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
+
+        let ktx2_data = ktx2_tex.write_to_memory()?;
+        buf.write_all(&ktx2_data)?;
+    } else {
+        // If image is smaller or equal to target size, use original image data directly
+        let rgba_img = img.to_rgba8();
+        let img_data = rgba_img.as_raw();
+
+        // Use R8G8B8A8Unorm (linear) format for material property textures
+        let mut ktx2_tex = Ktx2Texture::create(
+            img.width(),
+            img.height(),
+            1,
+            1,
+            1,
+            1,
+            ktx2_rw::VkFormat::R8G8B8A8Unorm,
+        )?;
+        ktx2_tex.set_image_data(0, 0, 0, img_data)?;
+        ktx2_tex.set_metadata("Tool", b"glb_opt")?;
+        ktx2_tex.set_metadata(
+            "Dimensions",
+            format!("{}x{}", img.width(), img.height()).as_bytes(),
+        )?;
+
+        // Use standard compression settings for metallic/roughness textures
+        let etc1s_params = BasisCompressionParams::builder()
+            .uastc(false)
+            .thread_count(num_cpus::get() as u32)
+            .quality_level(150)
+            .endpoint_rdo_threshold(1.25)
+            .selector_rdo_threshold(1.25)
+            .build();
+        ktx2_tex.compress_basis(&etc1s_params)?;
+        ktx2_tex.set_metadata("CompressionMode", b"ETC1S")?;
+
+        let ktx2_data = ktx2_tex.write_to_memory()?;
+        buf.write_all(&ktx2_data)?;
+    }
+
+    Ok(())
+}
+
 /// Resize and convert jpeg/png to ktx2 with Basis Universal compression
 fn resize_to_ktx2<W: Write>(
     img_data: &[u8],
@@ -260,6 +348,31 @@ fn resize_to_ktx2<W: Write>(
     Ok(())
 }
 
+/// Helper function to update image name/URI when converting to KTX2
+fn update_image_name_for_ktx2(image_name: &Option<String>) -> Option<String> {
+    if let Some(name) = image_name {
+        // Replace common image extensions with .ktx2
+        let updated_name = name
+            .replace(".jpg", ".ktx2")
+            .replace(".jpeg", ".ktx2")
+            .replace(".png", ".ktx2")
+            .replace(".webp", ".ktx2")
+            .replace(".JPG", ".ktx2")
+            .replace(".JPEG", ".ktx2")
+            .replace(".PNG", ".ktx2")
+            .replace(".WEBP", ".ktx2");
+
+        // If no extension was found, just append .ktx2
+        if updated_name == *name {
+            Some(format!("{name}.ktx2"))
+        } else {
+            Some(updated_name)
+        }
+    } else {
+        None
+    }
+}
+
 fn add_image(
     n_blob: &mut Vec<u8>,
     n_json: &mut Root,
@@ -293,6 +406,12 @@ fn add_image(
 
     n_img.buffer_view = Some(view_idx);
     n_img.mime_type = Some(MimeType(mime_type.to_string()));
+
+    // Update name and URI when converting to KTX2
+    if mime_type == "image/ktx2" {
+        n_img.name = update_image_name_for_ktx2(&img.name);
+        n_img.uri = update_image_name_for_ktx2(&img.uri);
+    }
 
     n_json.push(n_img)
 }
@@ -487,6 +606,67 @@ fn add_normal_texture(
     None
 }
 
+fn add_metallic_roughness_texture(
+    n_blob: &mut Vec<u8>,
+    n_json: &mut Root,
+    o_blob: &[u8],
+    o_json: &gltf::json::Root,
+    info: &gltf::json::texture::Info,
+    n_tex_size: u32,
+    convert_to_ktx2: bool,
+) -> Option<gltf::json::texture::Info> {
+    if let Some(bct_image_data) = get_image_data(o_blob, o_json, info.index) {
+        let mut new_bct_data: Vec<u8> = Vec::new();
+        let mut writer = Cursor::new(&mut new_bct_data);
+
+        let mime_type = if convert_to_ktx2 {
+            "image/ktx2"
+        } else {
+            "image/jpeg"
+        };
+
+        let resize_func = if convert_to_ktx2 {
+            resize_to_ktx2_linear // Use linear format for metallic/roughness
+        } else {
+            resize_to_jpg
+        };
+
+        return match resize_func(bct_image_data, n_tex_size, n_tex_size, &mut writer) {
+            Ok(_) => {
+                // Get image with proper error handling
+                let new_image = match o_json.images.get(info.index.value()) {
+                    Some(img) => img.clone(),
+                    None => return None,
+                };
+
+                let idx_img = add_image(
+                    n_blob,
+                    n_json,
+                    &new_image,
+                    &new_bct_data.to_vec(),
+                    mime_type,
+                );
+
+                // Get texture with proper error handling
+                let mut new_tex = match o_json.textures.get(info.index.value()) {
+                    Some(tex) => tex.clone(),
+                    None => return None,
+                };
+                new_tex.source = idx_img;
+
+                let idx_tex = n_json.push(new_tex);
+
+                let mut new_info = info.clone();
+                new_info.index = idx_tex;
+
+                Some(new_info)
+            }
+            Err(_) => None,
+        };
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn add_primitive(
     n_blob: &mut Vec<u8>,
@@ -535,7 +715,7 @@ fn add_primitive(
 
             // resize metal/rough tex
             if let Some(mr_info) = &mat.pbr_metallic_roughness.metallic_roughness_texture {
-                if let Some(new_info) = add_texture(
+                if let Some(new_info) = add_metallic_roughness_texture(
                     n_blob,
                     n_json,
                     o_blob,
