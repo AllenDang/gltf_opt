@@ -313,22 +313,32 @@ fn get_image_data<'a>(
     o_json: &gltf::json::Root,
     texture_idx: Index<Texture>,
 ) -> Option<&'a [u8]> {
-    if let Some(tex) = o_json.textures.get(texture_idx.value()) {
-        if let Some(img) = o_json.images.get(tex.source.value()) {
-            if let Some(idx_view) = img.buffer_view {
-                if let Some(view) = o_json.buffer_views.get(idx_view.value()) {
-                    let offset = match view.byte_offset {
-                        Some(o) => o.0 as usize,
-                        None => 0,
-                    };
-                    let length = view.byte_length.0 as usize;
+    // Validate texture exists
+    let tex = o_json.textures.get(texture_idx.value())?;
 
-                    return o_blob.get(offset..(offset + length));
-                }
-            }
-        }
+    // Validate image exists
+    let img = o_json.images.get(tex.source.value())?;
+
+    // Check if image has buffer_view (embedded data)
+    let idx_view = img.buffer_view?;
+
+    // Validate buffer_view exists
+    let view = o_json.buffer_views.get(idx_view.value())?;
+
+    // Calculate offset and length
+    let offset = match view.byte_offset {
+        Some(o) => o.0 as usize,
+        None => 0,
+    };
+    let length = view.byte_length.0 as usize;
+
+    // Validate the range is within the blob bounds
+    if offset.saturating_add(length) > o_blob.len() {
+        return None;
     }
-    None
+
+    // Return the image data slice
+    o_blob.get(offset..(offset + length))
 }
 
 fn add_texture(
@@ -339,63 +349,66 @@ fn add_texture(
     info: &gltf::json::texture::Info,
     n_tex_size: u32,
     convert_to_ktx2: bool,
-) -> Option<gltf::json::texture::Info> {
-    if let Some(bct_image_data) = get_image_data(o_blob, o_json, info.index) {
-        let mut new_bct_data: Vec<u8> = Vec::new();
-        let mut writer = Cursor::new(&mut new_bct_data);
+) -> Result<gltf::json::texture::Info, Box<dyn Error>> {
+    let bct_image_data = get_image_data(o_blob, o_json, info.index).ok_or_else(|| {
+        format!(
+            "Failed to get base color texture image data (texture index: {})",
+            info.index.value()
+        )
+    })?;
 
-        let mime_type = if convert_to_ktx2 {
-            "image/ktx2"
-        } else {
-            "image/jpeg"
-        };
+    let mut new_bct_data: Vec<u8> = Vec::new();
+    let mut writer = Cursor::new(&mut new_bct_data);
 
-        let resize_result = if convert_to_ktx2 {
-            resize_to_ktx2(
-                bct_image_data,
-                n_tex_size,
-                n_tex_size,
-                TextureType::BaseColor,
-                &mut writer,
-            )
-        } else {
-            resize_to_jpg(bct_image_data, n_tex_size, n_tex_size, &mut writer)
-        };
+    let mime_type = if convert_to_ktx2 {
+        "image/ktx2"
+    } else {
+        "image/jpeg"
+    };
 
-        return match resize_result {
-            Ok(_) => {
-                // Get image with proper error handling
-                let new_image = match o_json.images.get(info.index.value()) {
-                    Some(img) => img.clone(),
-                    None => return None,
-                };
-
-                let idx_img = add_image(
-                    n_blob,
-                    n_json,
-                    &new_image,
-                    &new_bct_data.to_vec(),
-                    mime_type,
-                );
-
-                // Get texture with proper error handling
-                let mut new_tex = match o_json.textures.get(info.index.value()) {
-                    Some(tex) => tex.clone(),
-                    None => return None,
-                };
-                new_tex.source = idx_img;
-
-                let idx_tex = n_json.push(new_tex);
-
-                let mut new_info = info.clone();
-                new_info.index = idx_tex;
-
-                Some(new_info)
-            }
-            Err(_) => None,
-        };
+    if convert_to_ktx2 {
+        resize_to_ktx2(
+            bct_image_data,
+            n_tex_size,
+            n_tex_size,
+            TextureType::BaseColor,
+            &mut writer,
+        )?;
+    } else {
+        resize_to_jpg(bct_image_data, n_tex_size, n_tex_size, &mut writer)?;
     }
-    None
+
+    // Get texture with proper error handling
+    let original_texture = o_json
+        .textures
+        .get(info.index.value())
+        .ok_or("Failed to get original texture")?;
+
+    // Get image with proper error handling
+    let new_image = o_json
+        .images
+        .get(original_texture.source.value())
+        .ok_or("Failed to get original image")?
+        .clone();
+
+    let idx_img = add_image(
+        n_blob,
+        n_json,
+        &new_image,
+        &new_bct_data.to_vec(),
+        mime_type,
+    );
+
+    // Clone texture after validation
+    let mut new_tex = original_texture.clone();
+    new_tex.source = idx_img;
+
+    let idx_tex = n_json.push(new_tex);
+
+    let mut new_info = info.clone();
+    new_info.index = idx_tex;
+
+    Ok(new_info)
 }
 
 fn add_normal_texture(
@@ -406,64 +419,66 @@ fn add_normal_texture(
     normal: &gltf::json::material::NormalTexture,
     n_tex_size: u32,
     convert_to_ktx2: bool,
-) -> Option<gltf::json::material::NormalTexture> {
-    if let Some(bct_image_data) = get_image_data(o_blob, o_json, normal.index) {
-        let mut new_bct_data: Vec<u8> = Vec::new();
-        let mut writer = Cursor::new(&mut new_bct_data);
+) -> Result<gltf::json::material::NormalTexture, Box<dyn Error>> {
+    let bct_image_data = get_image_data(o_blob, o_json, normal.index).ok_or_else(|| {
+        format!(
+            "Failed to get normal texture image data (texture index: {})",
+            normal.index.value()
+        )
+    })?;
 
-        let mime_type = if convert_to_ktx2 {
-            "image/ktx2"
-        } else {
-            "image/png"
-        };
+    let mut new_bct_data: Vec<u8> = Vec::new();
+    let mut writer = Cursor::new(&mut new_bct_data);
 
-        let resize_result = if convert_to_ktx2 {
-            resize_to_ktx2(
-                bct_image_data,
-                n_tex_size,
-                n_tex_size,
-                TextureType::Normal,
-                &mut writer,
-            )
-        } else {
-            resize_to_png(bct_image_data, n_tex_size, n_tex_size, &mut writer)
-        };
+    let mime_type = if convert_to_ktx2 {
+        "image/ktx2"
+    } else {
+        "image/png"
+    };
 
-        return match resize_result {
-            Ok(_) => {
-                // Get image with proper error handling
-                let new_image = match o_json.images.get(normal.index.value()) {
-                    Some(img) => img.clone(),
-                    None => return None,
-                };
-
-                let idx_img = add_image(
-                    n_blob,
-                    n_json,
-                    &new_image,
-                    &new_bct_data.to_vec(),
-                    mime_type,
-                );
-
-                // Get texture with proper error handling
-                let mut new_tex = match o_json.textures.get(normal.index.value()) {
-                    Some(tex) => tex.clone(),
-                    None => return None,
-                };
-                new_tex.source = idx_img;
-
-                let idx_tex = n_json.push(new_tex);
-
-                let mut new_normal = normal.clone();
-                new_normal.index = idx_tex;
-
-                Some(new_normal)
-            }
-            Err(_) => None,
-        };
+    if convert_to_ktx2 {
+        resize_to_ktx2(
+            bct_image_data,
+            n_tex_size,
+            n_tex_size,
+            TextureType::Normal,
+            &mut writer,
+        )?;
+    } else {
+        resize_to_png(bct_image_data, n_tex_size, n_tex_size, &mut writer)?;
     }
 
-    None
+    // Get texture with proper error handling
+    let original_texture = o_json
+        .textures
+        .get(normal.index.value())
+        .ok_or("Failed to get original normal texture")?;
+
+    // Get image with proper error handling
+    let new_image = o_json
+        .images
+        .get(original_texture.source.value())
+        .ok_or("Failed to get original normal texture image")?
+        .clone();
+
+    let idx_img = add_image(
+        n_blob,
+        n_json,
+        &new_image,
+        &new_bct_data.to_vec(),
+        mime_type,
+    );
+
+    // Clone texture after validation
+    let mut new_tex = original_texture.clone();
+    new_tex.source = idx_img;
+
+    let idx_tex = n_json.push(new_tex);
+
+    let mut new_normal = normal.clone();
+    new_normal.index = idx_tex;
+
+    Ok(new_normal)
 }
 
 fn add_metallic_roughness_texture(
@@ -474,63 +489,66 @@ fn add_metallic_roughness_texture(
     info: &gltf::json::texture::Info,
     n_tex_size: u32,
     convert_to_ktx2: bool,
-) -> Option<gltf::json::texture::Info> {
-    if let Some(bct_image_data) = get_image_data(o_blob, o_json, info.index) {
-        let mut new_bct_data: Vec<u8> = Vec::new();
-        let mut writer = Cursor::new(&mut new_bct_data);
+) -> Result<gltf::json::texture::Info, Box<dyn Error>> {
+    let bct_image_data = get_image_data(o_blob, o_json, info.index).ok_or_else(|| {
+        format!(
+            "Failed to get metallic/roughness texture image data (texture index: {})",
+            info.index.value()
+        )
+    })?;
 
-        let mime_type = if convert_to_ktx2 {
-            "image/ktx2"
-        } else {
-            "image/jpeg"
-        };
+    let mut new_bct_data: Vec<u8> = Vec::new();
+    let mut writer = Cursor::new(&mut new_bct_data);
 
-        let resize_result = if convert_to_ktx2 {
-            resize_to_ktx2(
-                bct_image_data,
-                n_tex_size,
-                n_tex_size,
-                TextureType::MetallicRoughness,
-                &mut writer,
-            )
-        } else {
-            resize_to_jpg(bct_image_data, n_tex_size, n_tex_size, &mut writer)
-        };
+    let mime_type = if convert_to_ktx2 {
+        "image/ktx2"
+    } else {
+        "image/jpeg"
+    };
 
-        return match resize_result {
-            Ok(_) => {
-                // Get image with proper error handling
-                let new_image = match o_json.images.get(info.index.value()) {
-                    Some(img) => img.clone(),
-                    None => return None,
-                };
-
-                let idx_img = add_image(
-                    n_blob,
-                    n_json,
-                    &new_image,
-                    &new_bct_data.to_vec(),
-                    mime_type,
-                );
-
-                // Get texture with proper error handling
-                let mut new_tex = match o_json.textures.get(info.index.value()) {
-                    Some(tex) => tex.clone(),
-                    None => return None,
-                };
-                new_tex.source = idx_img;
-
-                let idx_tex = n_json.push(new_tex);
-
-                let mut new_info = info.clone();
-                new_info.index = idx_tex;
-
-                Some(new_info)
-            }
-            Err(_) => None,
-        };
+    if convert_to_ktx2 {
+        resize_to_ktx2(
+            bct_image_data,
+            n_tex_size,
+            n_tex_size,
+            TextureType::MetallicRoughness,
+            &mut writer,
+        )?;
+    } else {
+        resize_to_jpg(bct_image_data, n_tex_size, n_tex_size, &mut writer)?;
     }
-    None
+
+    // Get texture with proper error handling
+    let original_texture = o_json
+        .textures
+        .get(info.index.value())
+        .ok_or("Failed to get original metallic/roughness texture")?;
+
+    // Get image with proper error handling
+    let new_image = o_json
+        .images
+        .get(original_texture.source.value())
+        .ok_or("Failed to get original metallic/roughness texture image")?
+        .clone();
+
+    let idx_img = add_image(
+        n_blob,
+        n_json,
+        &new_image,
+        &new_bct_data.to_vec(),
+        mime_type,
+    );
+
+    // Clone texture after validation
+    let mut new_tex = original_texture.clone();
+    new_tex.source = idx_img;
+
+    let idx_tex = n_json.push(new_tex);
+
+    let mut new_info = info.clone();
+    new_info.index = idx_tex;
+
+    Ok(new_info)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -543,7 +561,7 @@ fn add_primitive(
     n_tex_size: u32,
     remove_normal_texture: bool,
     convert_to_ktx2: bool,
-) -> Primitive {
+) -> Result<Primitive, Box<dyn Error>> {
     let mut n_p = p.clone();
 
     // copy indices
@@ -566,7 +584,7 @@ fn add_primitive(
 
             // resize base color tex
             if let Some(bct_info) = &mat.pbr_metallic_roughness.base_color_texture {
-                if let Some(new_info) = add_texture(
+                match add_texture(
                     n_blob,
                     n_json,
                     o_blob,
@@ -575,13 +593,18 @@ fn add_primitive(
                     n_tex_size,
                     convert_to_ktx2,
                 ) {
-                    n_mat.pbr_metallic_roughness.base_color_texture = Some(new_info);
+                    Ok(new_info) => {
+                        n_mat.pbr_metallic_roughness.base_color_texture = Some(new_info);
+                    }
+                    Err(e) => {
+                        return Err(format!("Failed to process base color texture: {e}").into());
+                    }
                 }
             }
 
             // resize metal/rough tex
             if let Some(mr_info) = &mat.pbr_metallic_roughness.metallic_roughness_texture {
-                if let Some(new_info) = add_metallic_roughness_texture(
+                match add_metallic_roughness_texture(
                     n_blob,
                     n_json,
                     o_blob,
@@ -590,7 +613,14 @@ fn add_primitive(
                     n_tex_size / 2,
                     convert_to_ktx2,
                 ) {
-                    n_mat.pbr_metallic_roughness.metallic_roughness_texture = Some(new_info);
+                    Ok(new_info) => {
+                        n_mat.pbr_metallic_roughness.metallic_roughness_texture = Some(new_info);
+                    }
+                    Err(e) => {
+                        return Err(
+                            format!("Failed to process metallic/roughness texture: {e}").into()
+                        );
+                    }
                 }
             }
 
@@ -599,7 +629,7 @@ fn add_primitive(
             } else {
                 // resize normal map
                 if let Some(normal_tex) = &mat.normal_texture {
-                    n_mat.normal_texture = add_normal_texture(
+                    match add_normal_texture(
                         n_blob,
                         n_json,
                         o_blob,
@@ -607,7 +637,14 @@ fn add_primitive(
                         normal_tex,
                         n_tex_size,
                         convert_to_ktx2,
-                    );
+                    ) {
+                        Ok(new_normal) => {
+                            n_mat.normal_texture = Some(new_normal);
+                        }
+                        Err(e) => {
+                            return Err(format!("Failed to process normal texture: {e}").into());
+                        }
+                    }
                 }
             }
 
@@ -617,7 +654,7 @@ fn add_primitive(
         }
     }
 
-    n_p
+    Ok(n_p)
 }
 
 fn pad_to_4bytes(data: &mut Vec<u8>) {
@@ -670,7 +707,7 @@ pub fn optimize<R: Read + Seek>(
                 new_texture_size,
                 remove_normal_texture,
                 convert_to_ktx2,
-            );
+            )?;
             n_mesh.primitives.push(np);
         }
 
