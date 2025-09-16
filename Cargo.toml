@@ -12,5 +12,5 @@ fast_image_resize = { version = "5.1.0", features = ["image", "rayon"] }
 gltf = "1.4.1"
 image = { version = "0.25.5", features = ["png", "jpeg", "webp", "rayon"] }
 imagesize = "0.14.0"
-ktx2-rw = { git = "https://github.com/AllenDang/ktx2-rw" }
+ktx2-rw = { version = "0.2.1" }
 num_cpus = "1.16"
