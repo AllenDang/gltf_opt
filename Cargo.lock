@@ -1227,9 +1227,9 @@ dependencies = [
 
 [[package]]
 name = "ktx2-rw"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ac39c6e09a50866d606cfc69e305cffc3364536e226b101bc9782c55e113ba5"
+checksum = "6475790bfdf2b157c42b748accf0af00b1b00c28a6dbffd7726982c733245e15"
 dependencies = [
  "bindgen",
  "cmake",
