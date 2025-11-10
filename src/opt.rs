@@ -5,10 +5,10 @@ use std::{
 };
 
 use fast_image_resize::IntoImageView;
-use gltf::json::{image::MimeType, mesh::Primitive, Index, Root, Texture};
+use gltf::json::{Index, Root, Texture, image::MimeType, mesh::Primitive};
 use image::{
-    codecs::{jpeg::JpegEncoder, png::PngEncoder},
     ImageEncoder,
+    codecs::{jpeg::JpegEncoder, png::PngEncoder},
 };
 use ktx2_rw::{BasisCompressionParams, Ktx2Texture};
 
@@ -271,37 +271,36 @@ fn add_accessor(
     o_json: &gltf::json::Root,
     idx: Index<gltf::json::Accessor>,
 ) -> Option<Index<gltf::json::Accessor>> {
-    if let Some(acc) = o_json.accessors.get(idx.value()) {
-        if let Some(idx_view) = acc.buffer_view {
-            if let Some(view) = o_json.buffer_views.get(idx_view.value()) {
-                let offset = match view.byte_offset {
-                    Some(o) => o.0 as usize,
-                    None => 0,
-                };
-                let length = view.byte_length.0 as usize;
+    if let Some(acc) = o_json.accessors.get(idx.value())
+        && let Some(idx_view) = acc.buffer_view
+        && let Some(view) = o_json.buffer_views.get(idx_view.value())
+    {
+        let offset = match view.byte_offset {
+            Some(o) => o.0 as usize,
+            None => 0,
+        };
+        let length = view.byte_length.0 as usize;
 
-                if let Some(data) = &o_blob.get(offset..(offset + length)) {
-                    let offset = n_blob.len();
-                    let length = data.len();
+        if let Some(data) = &o_blob.get(offset..(offset + length)) {
+            let offset = n_blob.len();
+            let length = data.len();
 
-                    n_blob.extend_from_slice(data);
+            n_blob.extend_from_slice(data);
 
-                    // create buffer_view
-                    let mut n_view = view.clone();
-                    n_view.byte_offset = Some(offset.into());
-                    n_view.byte_length = length.into();
+            // create buffer_view
+            let mut n_view = view.clone();
+            n_view.byte_offset = Some(offset.into());
+            n_view.byte_length = length.into();
 
-                    let n_view_idx = n_json.push(n_view);
+            let n_view_idx = n_json.push(n_view);
 
-                    // create accessor
-                    let mut n_acc = acc.clone();
-                    n_acc.buffer_view = Some(n_view_idx);
+            // create accessor
+            let mut n_acc = acc.clone();
+            n_acc.buffer_view = Some(n_view_idx);
 
-                    let idx_acc = n_json.push(n_acc);
+            let idx_acc = n_json.push(n_acc);
 
-                    return Some(idx_acc);
-                }
-            }
+            return Some(idx_acc);
         }
     }
 
@@ -578,87 +577,85 @@ fn add_primitive(
     }
 
     // add material
-    if let Some(idx_mat) = p.material {
-        if let Some(mat) = o_json.materials.get(idx_mat.value()) {
-            let mut n_mat = mat.clone();
+    if let Some(idx_mat) = p.material
+        && let Some(mat) = o_json.materials.get(idx_mat.value())
+    {
+        let mut n_mat = mat.clone();
 
-            // resize base color tex
-            if let Some(bct_info) = &mat.pbr_metallic_roughness.base_color_texture {
-                match add_texture(
+        // resize base color tex
+        if let Some(bct_info) = &mat.pbr_metallic_roughness.base_color_texture {
+            match add_texture(
+                n_blob,
+                n_json,
+                o_blob,
+                o_json,
+                bct_info,
+                n_tex_size,
+                convert_to_ktx2,
+            ) {
+                Ok(new_info) => {
+                    n_mat.pbr_metallic_roughness.base_color_texture = Some(new_info);
+                }
+                Err(e) => {
+                    return Err(format!("Failed to process base color texture: {e}").into());
+                }
+            }
+        }
+
+        // resize metal/rough tex
+        if let Some(mr_info) = &mat.pbr_metallic_roughness.metallic_roughness_texture {
+            match add_metallic_roughness_texture(
+                n_blob,
+                n_json,
+                o_blob,
+                o_json,
+                mr_info,
+                n_tex_size / 2,
+                convert_to_ktx2,
+            ) {
+                Ok(new_info) => {
+                    n_mat.pbr_metallic_roughness.metallic_roughness_texture = Some(new_info);
+                }
+                Err(e) => {
+                    return Err(format!("Failed to process metallic/roughness texture: {e}").into());
+                }
+            }
+        }
+
+        if remove_normal_texture {
+            n_mat.normal_texture = None;
+        } else {
+            // resize normal map
+            if let Some(normal_tex) = &mat.normal_texture {
+                match add_normal_texture(
                     n_blob,
                     n_json,
                     o_blob,
                     o_json,
-                    bct_info,
+                    normal_tex,
                     n_tex_size,
                     convert_to_ktx2,
                 ) {
-                    Ok(new_info) => {
-                        n_mat.pbr_metallic_roughness.base_color_texture = Some(new_info);
+                    Ok(new_normal) => {
+                        n_mat.normal_texture = Some(new_normal);
                     }
                     Err(e) => {
-                        return Err(format!("Failed to process base color texture: {e}").into());
+                        return Err(format!("Failed to process normal texture: {e}").into());
                     }
                 }
             }
-
-            // resize metal/rough tex
-            if let Some(mr_info) = &mat.pbr_metallic_roughness.metallic_roughness_texture {
-                match add_metallic_roughness_texture(
-                    n_blob,
-                    n_json,
-                    o_blob,
-                    o_json,
-                    mr_info,
-                    n_tex_size / 2,
-                    convert_to_ktx2,
-                ) {
-                    Ok(new_info) => {
-                        n_mat.pbr_metallic_roughness.metallic_roughness_texture = Some(new_info);
-                    }
-                    Err(e) => {
-                        return Err(
-                            format!("Failed to process metallic/roughness texture: {e}").into()
-                        );
-                    }
-                }
-            }
-
-            if remove_normal_texture {
-                n_mat.normal_texture = None;
-            } else {
-                // resize normal map
-                if let Some(normal_tex) = &mat.normal_texture {
-                    match add_normal_texture(
-                        n_blob,
-                        n_json,
-                        o_blob,
-                        o_json,
-                        normal_tex,
-                        n_tex_size,
-                        convert_to_ktx2,
-                    ) {
-                        Ok(new_normal) => {
-                            n_mat.normal_texture = Some(new_normal);
-                        }
-                        Err(e) => {
-                            return Err(format!("Failed to process normal texture: {e}").into());
-                        }
-                    }
-                }
-            }
-
-            // update material
-            let idx_mat = n_json.push(n_mat);
-            n_p.material = Some(idx_mat);
         }
+
+        // update material
+        let idx_mat = n_json.push(n_mat);
+        n_p.material = Some(idx_mat);
     }
 
     Ok(n_p)
 }
 
 fn pad_to_4bytes(data: &mut Vec<u8>) {
-    while data.len() % 4 != 0 {
+    while !data.len().is_multiple_of(4) {
         data.push(0);
     }
 }
@@ -690,7 +687,6 @@ pub fn optimize<R: Read + Seek>(
         nodes: o_json.nodes.clone(),
         samplers: o_json.samplers.clone(),
         scenes: o_json.scenes.clone(),
-        skins: o_json.skins.clone(),
         ..Default::default()
     };
 
@@ -712,6 +708,19 @@ pub fn optimize<R: Read + Seek>(
         }
 
         n_json.push(n_mesh);
+    }
+
+    // Process skins and their inverseBindMatrices accessors
+    for skin in o_json.skins.iter() {
+        let mut n_skin = skin.clone();
+
+        // Copy the inverseBindMatrices accessor if it exists
+        if let Some(ibm_idx) = skin.inverse_bind_matrices {
+            n_skin.inverse_bind_matrices =
+                add_accessor(&mut n_blob, &mut n_json, o_blob, o_json, ibm_idx);
+        }
+
+        n_json.push(n_skin);
     }
 
     pad_to_4bytes(&mut n_blob);
