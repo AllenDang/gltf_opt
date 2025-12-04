@@ -2,7 +2,11 @@
 name = "gltf_opt"
 version = "0.1.3"
 edition = "2024"
-description = "Optimize glb file by resize it's textures"
+description = "Optimize glb file by resizing textures and adjusting pivot points"
+license = "MIT"
+repository = "https://github.com/AllenDang/gltf_opt"
+keywords = ["gltf", "glb", "optimization", "texture", "3d"]
+categories = ["graphics", "game-development"]
 
 [lib]
 name = "gltf_opt"
