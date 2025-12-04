@@ -271,6 +271,18 @@ fn add_accessor(
     o_json: &gltf::json::Root,
     idx: Index<gltf::json::Accessor>,
 ) -> Option<Index<gltf::json::Accessor>> {
+    add_accessor_with_offset(n_blob, n_json, o_blob, o_json, idx, None)
+}
+
+/// Add accessor with optional position offset for POSITION attributes
+fn add_accessor_with_offset(
+    n_blob: &mut Vec<u8>,
+    n_json: &mut Root,
+    o_blob: &[u8],
+    o_json: &gltf::json::Root,
+    idx: Index<gltf::json::Accessor>,
+    position_offset: Option<[f32; 3]>,
+) -> Option<Index<gltf::json::Accessor>> {
     if let Some(acc) = o_json.accessors.get(idx.value())
         && let Some(idx_view) = acc.buffer_view
         && let Some(view) = o_json.buffer_views.get(idx_view.value())
@@ -282,25 +294,116 @@ fn add_accessor(
         let length = view.byte_length.0 as usize;
 
         if let Some(data) = &o_blob.get(offset..(offset + length)) {
-            let offset = n_blob.len();
-            let length = data.len();
+            let n_offset = n_blob.len();
 
-            n_blob.extend_from_slice(data);
+            // If we have a position offset and this is a VEC3 accessor, apply the offset
+            if let Some(pos_offset) = position_offset {
+                let acc_offset = acc.byte_offset.map(|o| o.0 as usize).unwrap_or(0);
+                let stride = view.byte_stride.map(|s| s.0 as usize).unwrap_or(12); // 3 * f32 = 12 bytes
+                let count = acc.count.0 as usize;
 
-            // create buffer_view
-            let mut n_view = view.clone();
-            n_view.byte_offset = Some(offset.into());
-            n_view.byte_length = length.into();
+                let mut modified_data = data.to_vec();
 
-            let n_view_idx = n_json.push(n_view);
+                for i in 0..count {
+                    let start = acc_offset + i * stride;
+                    if start + 12 <= modified_data.len() {
+                        // Read current position
+                        let x = f32::from_le_bytes([
+                            modified_data[start],
+                            modified_data[start + 1],
+                            modified_data[start + 2],
+                            modified_data[start + 3],
+                        ]);
+                        let y = f32::from_le_bytes([
+                            modified_data[start + 4],
+                            modified_data[start + 5],
+                            modified_data[start + 6],
+                            modified_data[start + 7],
+                        ]);
+                        let z = f32::from_le_bytes([
+                            modified_data[start + 8],
+                            modified_data[start + 9],
+                            modified_data[start + 10],
+                            modified_data[start + 11],
+                        ]);
 
-            // create accessor
-            let mut n_acc = acc.clone();
-            n_acc.buffer_view = Some(n_view_idx);
+                        // Apply offset
+                        let new_x = x + pos_offset[0];
+                        let new_y = y + pos_offset[1];
+                        let new_z = z + pos_offset[2];
 
-            let idx_acc = n_json.push(n_acc);
+                        // Write back
+                        modified_data[start..start + 4].copy_from_slice(&new_x.to_le_bytes());
+                        modified_data[start + 4..start + 8].copy_from_slice(&new_y.to_le_bytes());
+                        modified_data[start + 8..start + 12].copy_from_slice(&new_z.to_le_bytes());
+                    }
+                }
 
-            return Some(idx_acc);
+                n_blob.extend_from_slice(&modified_data);
+
+                // Update accessor min/max values
+                let mut n_acc = acc.clone();
+                if let Some(ref mut min_val) = n_acc.min {
+                    if let Some(min_arr) = min_val.as_array_mut() {
+                        if min_arr.len() >= 3 {
+                            if let (Some(x), Some(y), Some(z)) = (
+                                min_arr[0].as_f64(),
+                                min_arr[1].as_f64(),
+                                min_arr[2].as_f64(),
+                            ) {
+                                min_arr[0] = (x as f32 + pos_offset[0]).into();
+                                min_arr[1] = (y as f32 + pos_offset[1]).into();
+                                min_arr[2] = (z as f32 + pos_offset[2]).into();
+                            }
+                        }
+                    }
+                }
+                if let Some(ref mut max_val) = n_acc.max {
+                    if let Some(max_arr) = max_val.as_array_mut() {
+                        if max_arr.len() >= 3 {
+                            if let (Some(x), Some(y), Some(z)) = (
+                                max_arr[0].as_f64(),
+                                max_arr[1].as_f64(),
+                                max_arr[2].as_f64(),
+                            ) {
+                                max_arr[0] = (x as f32 + pos_offset[0]).into();
+                                max_arr[1] = (y as f32 + pos_offset[1]).into();
+                                max_arr[2] = (z as f32 + pos_offset[2]).into();
+                            }
+                        }
+                    }
+                }
+
+                // create buffer_view
+                let mut n_view = view.clone();
+                n_view.byte_offset = Some(n_offset.into());
+                n_view.byte_length = modified_data.len().into();
+
+                let n_view_idx = n_json.push(n_view);
+
+                n_acc.buffer_view = Some(n_view_idx);
+                let idx_acc = n_json.push(n_acc);
+
+                return Some(idx_acc);
+            } else {
+                let length = data.len();
+                n_blob.extend_from_slice(data);
+
+                // create buffer_view
+                let mut n_view = view.clone();
+                n_view.byte_offset = Some(n_offset.into());
+                n_view.byte_length = length.into();
+
+                let n_view_idx = n_json.push(n_view);
+
+                // create accessor
+                let mut n_acc = acc.clone();
+                n_acc.buffer_view = Some(n_view_idx);
+
+                let idx_acc = n_json.push(n_acc);
+
+                return Some(idx_acc);
+            }
         }
     }
 
@@ -560,6 +663,7 @@ fn add_primitive(
     n_tex_size: u32,
     remove_normal_texture: bool,
     convert_to_ktx2: bool,
+    pivot_offset: Option<[f32; 3]>,
 ) -> Result<Primitive, Box<dyn Error>> {
     let mut n_p = p.clone();
 
@@ -571,7 +675,19 @@ fn add_primitive(
     // copy attributes
     n_p.attributes.clear();
     for (k, v) in &p.attributes {
-        if let Some(idx_acc) = add_accessor(n_blob, n_json, o_blob, o_json, *v) {
+        // Apply pivot offset only to POSITION attributes
+        let offset_to_apply = if matches!(
+            k,
+            gltf::json::validation::Checked::Valid(gltf::json::mesh::Semantic::Positions)
+        ) {
+            pivot_offset
+        } else {
+            None
+        };
+
+        if let Some(idx_acc) =
+            add_accessor_with_offset(n_blob, n_json, o_blob, o_json, *v, offset_to_apply)
+        {
             n_p.attributes.insert(k.clone(), idx_acc);
         }
     }
@@ -781,37 +897,13 @@ pub fn optimize<R: Read + Seek>(
         extensions_required.push("KHR_texture_basisu".to_string());
     }
 
-    // Clone nodes and apply pivot offset to root nodes if needed
-    let mut nodes = o_json.nodes.clone();
-    if let Some(offset) = pivot_offset {
-        // Find root nodes (nodes referenced by scenes)
-        let mut root_node_indices: Vec<usize> = Vec::new();
-        for scene in &o_json.scenes {
-            for node_idx in &scene.nodes {
-                root_node_indices.push(node_idx.value());
-            }
-        }
-
-        // Apply offset to root nodes
-        for idx in root_node_indices {
-            if let Some(node) = nodes.get_mut(idx) {
-                let current_translation = node.translation.unwrap_or([0.0, 0.0, 0.0]);
-                node.translation = Some([
-                    current_translation[0] + offset[0],
-                    current_translation[1] + offset[1],
-                    current_translation[2] + offset[2],
-                ]);
-            }
-        }
-    }
-
     let mut n_json = gltf::json::Root {
         asset: o_json.asset.clone(),
         scene: o_json.scene,
         extensions_required: extensions_required.clone(),
         extensions_used: extensions_required,
         cameras: o_json.cameras.clone(),
-        nodes,
+        nodes: o_json.nodes.clone(),
         samplers: o_json.samplers.clone(),
         scenes: o_json.scenes.clone(),
         ..Default::default()
@@ -830,6 +922,7 @@ pub fn optimize<R: Read + Seek>(
                 new_texture_size,
                 remove_normal_texture,
                 convert_to_ktx2,
+                pivot_offset,
             )?;
             n_mesh.primitives.push(np);
         }
