@@ -660,11 +660,106 @@ fn pad_to_4bytes(data: &mut Vec<u8>) {
     }
 }
 
+/// Get raw position data from an accessor as f32 vec3 values
+fn get_position_data(
+    o_blob: &[u8],
+    o_json: &gltf::json::Root,
+    accessor_idx: Index<gltf::json::Accessor>,
+) -> Option<Vec<[f32; 3]>> {
+    let acc = o_json.accessors.get(accessor_idx.value())?;
+    let idx_view = acc.buffer_view?;
+    let view = o_json.buffer_views.get(idx_view.value())?;
+
+    let offset = view.byte_offset.map(|o| o.0 as usize).unwrap_or(0);
+    let acc_offset = acc.byte_offset.map(|o| o.0 as usize).unwrap_or(0);
+    let stride = view.byte_stride.map(|s| s.0).unwrap_or(12); // 3 * f32
+    let count = acc.count.0 as usize;
+
+    let data = o_blob.get(offset..)?;
+
+    let mut positions = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = acc_offset + i * stride;
+        if start + 12 > data.len() {
+            return None;
+        }
+        let x = f32::from_le_bytes([
+            data[start],
+            data[start + 1],
+            data[start + 2],
+            data[start + 3],
+        ]);
+        let y = f32::from_le_bytes([
+            data[start + 4],
+            data[start + 5],
+            data[start + 6],
+            data[start + 7],
+        ]);
+        let z = f32::from_le_bytes([
+            data[start + 8],
+            data[start + 9],
+            data[start + 10],
+            data[start + 11],
+        ]);
+        positions.push([x, y, z]);
+    }
+
+    Some(positions)
+}
+
+/// Calculate bounding box from all meshes in the GLTF
+fn calculate_bounding_box(
+    o_blob: &[u8],
+    o_json: &gltf::json::Root,
+) -> Option<([f32; 3], [f32; 3])> {
+    let mut min = [f32::MAX, f32::MAX, f32::MAX];
+    let mut max = [f32::MIN, f32::MIN, f32::MIN];
+    let mut found_positions = false;
+
+    for mesh in &o_json.meshes {
+        for primitive in &mesh.primitives {
+            // Look for POSITION attribute
+            for (semantic, acc_idx) in &primitive.attributes {
+                if matches!(
+                    semantic,
+                    gltf::json::validation::Checked::Valid(gltf::json::mesh::Semantic::Positions)
+                ) && let Some(positions) = get_position_data(o_blob, o_json, *acc_idx)
+                {
+                    found_positions = true;
+                    for pos in positions {
+                        min[0] = min[0].min(pos[0]);
+                        min[1] = min[1].min(pos[1]);
+                        min[2] = min[2].min(pos[2]);
+                        max[0] = max[0].max(pos[0]);
+                        max[1] = max[1].max(pos[1]);
+                        max[2] = max[2].max(pos[2]);
+                    }
+                }
+            }
+        }
+    }
+
+    if found_positions {
+        Some((min, max))
+    } else {
+        None
+    }
+}
+
+/// Calculate the offset needed to move pivot to center-bottom
+fn calculate_center_bottom_offset(min: [f32; 3], max: [f32; 3]) -> [f32; 3] {
+    let center_x = (min[0] + max[0]) / 2.0;
+    let center_z = (min[2] + max[2]) / 2.0;
+    // Offset is negative because we want to move the model so center-bottom becomes origin
+    [-center_x, -min[1], -center_z]
+}
+
 pub fn optimize<R: Read + Seek>(
     reader: &mut R,
     new_texture_size: u32,
     remove_normal_texture: bool,
     convert_to_ktx2: bool,
+    center_pivot: bool,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let o_data = gltf::Gltf::from_reader(reader)?;
     let o_json = o_data.as_json();
@@ -672,10 +767,42 @@ pub fn optimize<R: Read + Seek>(
 
     let mut n_blob: Vec<u8> = Vec::new();
 
+    // Calculate pivot offset if requested
+    let pivot_offset = if center_pivot {
+        calculate_bounding_box(o_blob, o_json)
+            .map(|(min, max)| calculate_center_bottom_offset(min, max))
+    } else {
+        None
+    };
+
     // Clone extensions and add KHR_texture_basisu if not already present
     let mut extensions_required = o_json.extensions_required.clone();
     if convert_to_ktx2 && !extensions_required.contains(&"KHR_texture_basisu".to_string()) {
         extensions_required.push("KHR_texture_basisu".to_string());
+    }
+
+    // Clone nodes and apply pivot offset to root nodes if needed
+    let mut nodes = o_json.nodes.clone();
+    if let Some(offset) = pivot_offset {
+        // Find root nodes (nodes referenced by scenes)
+        let mut root_node_indices: Vec<usize> = Vec::new();
+        for scene in &o_json.scenes {
+            for node_idx in &scene.nodes {
+                root_node_indices.push(node_idx.value());
+            }
+        }
+
+        // Apply offset to root nodes
+        for idx in root_node_indices {
+            if let Some(node) = nodes.get_mut(idx) {
+                let current_translation = node.translation.unwrap_or([0.0, 0.0, 0.0]);
+                node.translation = Some([
+                    current_translation[0] + offset[0],
+                    current_translation[1] + offset[1],
+                    current_translation[2] + offset[2],
+                ]);
+            }
+        }
     }
 
     let mut n_json = gltf::json::Root {
@@ -684,7 +811,7 @@ pub fn optimize<R: Read + Seek>(
         extensions_required: extensions_required.clone(),
         extensions_used: extensions_required,
         cameras: o_json.cameras.clone(),
-        nodes: o_json.nodes.clone(),
+        nodes,
         samplers: o_json.samplers.clone(),
         scenes: o_json.scenes.clone(),
         ..Default::default()
