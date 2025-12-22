@@ -28,6 +28,12 @@ fn resize_to_jpg<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let img = image::load_from_memory(img_data)?;
 
+    // If image dimensions match target exactly, keep original bytes
+    if img.width() == width && img.height() == height {
+        buf.write_all(img_data)?;
+        return Ok(());
+    }
+
     // Only resize if image dimensions are greater than target dimensions
     if img.width() > width || img.height() > height {
         let mut dst_img = fast_image_resize::images::Image::new(
@@ -46,7 +52,7 @@ fn resize_to_jpg<W: Write>(
             img.color().into(),
         )?;
     } else {
-        // If image is smaller or equal to target size, just copy it as is
+        // If image is smaller than target size, re-encode without resizing
         JpegEncoder::new(&mut buf).write_image(
             img.as_bytes(),
             img.width(),
@@ -66,6 +72,12 @@ fn resize_to_png<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let img = image::load_from_memory(img_data)?;
 
+    // If image dimensions match target exactly, keep original bytes
+    if img.width() == width && img.height() == height {
+        buf.write_all(img_data)?;
+        return Ok(());
+    }
+
     // Only resize if image dimensions are greater than target dimensions
     if img.width() > width || img.height() > height {
         let mut dst_img = fast_image_resize::images::Image::new(
@@ -84,7 +96,7 @@ fn resize_to_png<W: Write>(
             img.color().into(),
         )?;
     } else {
-        // If image is smaller or equal to target size, just copy it as is
+        // If image is smaller than target size, re-encode without resizing
         PngEncoder::new(&mut buf).write_image(
             img.as_bytes(),
             img.width(),
@@ -98,6 +110,7 @@ fn resize_to_png<W: Write>(
 
 /// Unified function to resize and convert images to KTX2 with Basis Universal compression
 /// Uses appropriate compression settings based on texture type
+/// Preserves original color space (RGB vs RGBA)
 fn resize_to_ktx2<W: Write>(
     img_data: &[u8],
     width: u32,
@@ -113,29 +126,48 @@ fn resize_to_ktx2<W: Write>(
         TextureType::BaseColor | TextureType::MetallicRoughness => (150, 1.25, 1.25), // Standard quality
     };
 
+    // Determine if original image has alpha channel
+    let has_alpha = matches!(
+        img.color(),
+        image::ColorType::Rgba8
+            | image::ColorType::Rgba16
+            | image::ColorType::Rgba32F
+            | image::ColorType::La8
+            | image::ColorType::La16
+    );
+
+    let (vk_format, pixel_type) = if has_alpha {
+        (
+            ktx2_rw::VkFormat::R8G8B8A8Unorm,
+            fast_image_resize::PixelType::U8x4,
+        )
+    } else {
+        (
+            ktx2_rw::VkFormat::R8G8B8Unorm,
+            fast_image_resize::PixelType::U8x3,
+        )
+    };
+
     // Only resize if image dimensions are greater than target dimensions
     if img.width() > width || img.height() > height {
-        let rgba_img = img.to_rgba8();
+        let (src_data, src_width, src_height) = if has_alpha {
+            let rgba_img = img.to_rgba8();
+            (rgba_img.into_raw(), img.width(), img.height())
+        } else {
+            let rgb_img = img.to_rgb8();
+            (rgb_img.into_raw(), img.width(), img.height())
+        };
 
         let src_img = fast_image_resize::images::Image::from_vec_u8(
-            img.width(),
-            img.height(),
-            rgba_img.into_raw(),
-            fast_image_resize::PixelType::U8x4, // Always RGBA8
+            src_width, src_height, src_data, pixel_type,
         )?;
 
-        let mut dst_img = fast_image_resize::images::Image::new(
-            width,
-            height,
-            fast_image_resize::PixelType::U8x4,
-        );
+        let mut dst_img = fast_image_resize::images::Image::new(width, height, pixel_type);
 
         let mut resizer = fast_image_resize::Resizer::new();
         resizer.resize(&src_img, &mut dst_img, None)?;
 
-        // All texture types now use R8G8B8A8Unorm (linear) format
-        let mut ktx2_tex =
-            Ktx2Texture::create(width, height, 1, 1, 1, 1, ktx2_rw::VkFormat::R8G8B8A8Unorm)?;
+        let mut ktx2_tex = Ktx2Texture::create(width, height, 1, 1, 1, 1, vk_format)?;
         ktx2_tex.set_image_data(0, 0, 0, dst_img.buffer())?;
         ktx2_tex.set_metadata("Tool", b"glb_opt")?;
         ktx2_tex.set_metadata("Dimensions", format!("{width}x{height}").as_bytes())?;
@@ -153,24 +185,21 @@ fn resize_to_ktx2<W: Write>(
         let ktx2_data = ktx2_tex.write_to_memory()?;
         buf.write_all(&ktx2_data)?;
     } else {
-        // If image is smaller or equal to target size, use original image data directly
-        let rgba_img = img.to_rgba8();
-        let img_data = rgba_img.as_raw();
+        // If image is smaller or equal to target size, convert to KTX2 without resizing
+        let (final_data, final_width, final_height) = if has_alpha {
+            let rgba_img = img.to_rgba8();
+            (rgba_img.into_raw(), img.width(), img.height())
+        } else {
+            let rgb_img = img.to_rgb8();
+            (rgb_img.into_raw(), img.width(), img.height())
+        };
 
-        let mut ktx2_tex = Ktx2Texture::create(
-            img.width(),
-            img.height(),
-            1,
-            1,
-            1,
-            1,
-            ktx2_rw::VkFormat::R8G8B8A8Unorm,
-        )?;
-        ktx2_tex.set_image_data(0, 0, 0, img_data)?;
+        let mut ktx2_tex = Ktx2Texture::create(final_width, final_height, 1, 1, 1, 1, vk_format)?;
+        ktx2_tex.set_image_data(0, 0, 0, &final_data)?;
         ktx2_tex.set_metadata("Tool", b"glb_opt")?;
         ktx2_tex.set_metadata(
             "Dimensions",
-            format!("{}x{}", img.width(), img.height()).as_bytes(),
+            format!("{}x{}", final_width, final_height).as_bytes(),
         )?;
 
         let etc1s_params = BasisCompressionParams::builder()
@@ -299,7 +328,7 @@ fn add_accessor_with_offset(
             // If we have a position offset and this is a VEC3 accessor, apply the offset
             if let Some(pos_offset) = position_offset {
                 let acc_offset = acc.byte_offset.map(|o| o.0 as usize).unwrap_or(0);
-                let stride = view.byte_stride.map(|s| s.0 as usize).unwrap_or(12); // 3 * f32 = 12 bytes
+                let stride = view.byte_stride.map(|s| s.0).unwrap_or(12); // 3 * f32 = 12 bytes
                 let count = acc.count.0 as usize;
 
                 let mut modified_data = data.to_vec();
@@ -343,35 +372,31 @@ fn add_accessor_with_offset(
 
                 // Update accessor min/max values
                 let mut n_acc = acc.clone();
-                if let Some(ref mut min_val) = n_acc.min {
-                    if let Some(min_arr) = min_val.as_array_mut() {
-                        if min_arr.len() >= 3 {
-                            if let (Some(x), Some(y), Some(z)) = (
-                                min_arr[0].as_f64(),
-                                min_arr[1].as_f64(),
-                                min_arr[2].as_f64(),
-                            ) {
-                                min_arr[0] = (x as f32 + pos_offset[0]).into();
-                                min_arr[1] = (y as f32 + pos_offset[1]).into();
-                                min_arr[2] = (z as f32 + pos_offset[2]).into();
-                            }
-                        }
-                    }
+                if let Some(ref mut min_val) = n_acc.min
+                    && let Some(min_arr) = min_val.as_array_mut()
+                    && min_arr.len() >= 3
+                    && let (Some(x), Some(y), Some(z)) = (
+                        min_arr[0].as_f64(),
+                        min_arr[1].as_f64(),
+                        min_arr[2].as_f64(),
+                    )
+                {
+                    min_arr[0] = (x as f32 + pos_offset[0]).into();
+                    min_arr[1] = (y as f32 + pos_offset[1]).into();
+                    min_arr[2] = (z as f32 + pos_offset[2]).into();
                 }
-                if let Some(ref mut max_val) = n_acc.max {
-                    if let Some(max_arr) = max_val.as_array_mut() {
-                        if max_arr.len() >= 3 {
-                            if let (Some(x), Some(y), Some(z)) = (
-                                max_arr[0].as_f64(),
-                                max_arr[1].as_f64(),
-                                max_arr[2].as_f64(),
-                            ) {
-                                max_arr[0] = (x as f32 + pos_offset[0]).into();
-                                max_arr[1] = (y as f32 + pos_offset[1]).into();
-                                max_arr[2] = (z as f32 + pos_offset[2]).into();
-                            }
-                        }
-                    }
+                if let Some(ref mut max_val) = n_acc.max
+                    && let Some(max_arr) = max_val.as_array_mut()
+                    && max_arr.len() >= 3
+                    && let (Some(x), Some(y), Some(z)) = (
+                        max_arr[0].as_f64(),
+                        max_arr[1].as_f64(),
+                        max_arr[2].as_f64(),
+                    )
+                {
+                    max_arr[0] = (x as f32 + pos_offset[0]).into();
+                    max_arr[1] = (y as f32 + pos_offset[1]).into();
+                    max_arr[2] = (z as f32 + pos_offset[2]).into();
                 }
 
                 // create buffer_view

@@ -16,8 +16,7 @@ fn main() {
     let mut reader = BufReader::new(file);
 
     // Optimize with center_pivot = true, no texture conversion
-    let result = optimize(&mut reader, 1024, false, false, true)
-        .expect("Failed to optimize");
+    let result = optimize(&mut reader, 1024, false, false, true).expect("Failed to optimize");
 
     let output = File::create(output_path).expect("Failed to create output file");
     let mut writer = BufWriter::new(output);
