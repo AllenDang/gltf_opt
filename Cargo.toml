@@ -1,6 +1,6 @@
 [package]
 name = "gltf_opt"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "Optimize glb file by resizing textures and adjusting pivot points"
 license = "MIT"
