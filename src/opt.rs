@@ -908,8 +908,12 @@ pub fn optimize<R: Read + Seek>(
 
     let mut n_blob: Vec<u8> = Vec::new();
 
-    // Calculate pivot offset if requested
-    let pivot_offset = if center_pivot {
+    // Check if model has skeleton/skin or animations
+    // If so, skip pivot adjustment as it would cause incorrect deformation
+    let has_skeleton_or_animation = !o_json.skins.is_empty() || !o_json.animations.is_empty();
+
+    // Calculate pivot offset if requested (disabled for skinned/animated models)
+    let pivot_offset = if center_pivot && !has_skeleton_or_animation {
         calculate_bounding_box(o_blob, o_json)
             .map(|(min, max)| calculate_center_bottom_offset(min, max))
     } else {
@@ -966,6 +970,49 @@ pub fn optimize<R: Read + Seek>(
         }
 
         n_json.push(n_skin);
+    }
+
+    // Process animations and their sampler accessors
+    for animation in o_json.animations.iter() {
+        let mut n_animation = animation.clone();
+        n_animation.samplers.clear();
+
+        // Build a mapping from old sampler index to new sampler index
+        let mut sampler_index_map: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+
+        // Copy each sampler's input/output accessors
+        for (old_idx, sampler) in animation.samplers.iter().enumerate() {
+            let mut n_sampler = sampler.clone();
+
+            // Copy input accessor (timestamps/keyframes)
+            if let Some(input_idx) =
+                add_accessor(&mut n_blob, &mut n_json, o_blob, o_json, sampler.input)
+            {
+                n_sampler.input = input_idx;
+            }
+
+            // Copy output accessor (transformation values)
+            if let Some(output_idx) =
+                add_accessor(&mut n_blob, &mut n_json, o_blob, o_json, sampler.output)
+            {
+                n_sampler.output = output_idx;
+            }
+
+            let new_idx = n_animation.samplers.len();
+            sampler_index_map.insert(old_idx, new_idx);
+            n_animation.samplers.push(n_sampler);
+        }
+
+        // Update channel sampler indices to point to new samplers
+        for channel in n_animation.channels.iter_mut() {
+            let old_sampler_idx = channel.sampler.value();
+            if let Some(&new_idx) = sampler_index_map.get(&old_sampler_idx) {
+                channel.sampler = Index::new(new_idx as u32);
+            }
+        }
+
+        n_json.push(n_animation);
     }
 
     pad_to_4bytes(&mut n_blob);

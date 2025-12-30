@@ -18,6 +18,7 @@ This library provides functionality to optimize GLB files by:
 - Remove normal textures to reduce file size
 - Center pivot point to bottom center of the model (modifies vertex positions directly)
 - Preserve GLB structure and other non-texture data
+- Full support for skeleton/skin bindings and animations
 
 ## Installation
 
@@ -54,9 +55,9 @@ std::fs::write("optimized.glb", optimized_glb)?;
 - `convert_to_ktx2`: If true, textures will be converted to KTX2 format with Basis Universal compression
 - `center_pivot`: If true, the model's pivot point will be moved to the bottom center by modifying vertex positions
 
-## Limitations
+## Notes
 
-- **Skinned meshes**: The `center_pivot` feature does not currently support models with skeleton/skin bindings. Using it on skinned meshes may result in incorrect deformation.
+- **Skinned/animated models**: When a model contains skeleton/skin bindings or animations, the `center_pivot` option is automatically ignored to prevent incorrect deformation. Texture optimization is still applied normally.
 
 ## Dependencies
 
